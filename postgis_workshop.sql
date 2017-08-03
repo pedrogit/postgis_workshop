@@ -1,7 +1,7 @@
 ﻿--------------------------------------------
 -- Advanced Spatial Analysis with PostGIS
 -- Pierre Racine
--- Version 2.0, August 2017
+-- Version 2.0.1, August 2017
 --------------------------------------------
 -- Start the PostgreSQL server
 -- Start PgAdmin III
@@ -11,9 +11,9 @@
 CREATE EXTENSION postgis;
 SELECT postgis_full_version();
 
---------------------------------------------
+-----------------------------------
 -- Load the forest cover shapefile
---------------------------------------------
+-----------------------------------
 -- Determine the SRID of the shapefile with http://prj2epsg.org/search
 -- You can also search for keywords from the .prj file in the spatial_ref_sys table:
 SELECT * 
@@ -29,14 +29,15 @@ WHERE srtext LIKE '%MTM%' AND srtext LIKE '%NAD83%';
 SELECT * 
 FROM a_forestcover_mtm7;
 
--------------------------------------------------------------------------------------------------------------------
--- Load the PostGIS Addons (for ST_GeoTableSummary() and others later) and run the test file.
--------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------
+-- Load the PostGIS Add-ons (for ST_GeoTableSummary() and others later) and run the test file...
+-------------------------------------------------------------------------------------------------
 
---------------------------------------------------------------------------------
--- 1.1) Create a summary of the topological properties of the forest cover
---------------------------------------------------------------------------------
+---------------------------------------------------------------------------
+-- 1.1) Generate a summary of the topological properties of the forest cover
+---------------------------------------------------------------------------
 
+-- *** Actual Query - Generate table summary (30s)
 --DROP TABLE IF EXISTS a_forestcover_mtm7_summary;
 CREATE TABLE a_forestcover_mtm7_summary AS
 SELECT * 
@@ -49,9 +50,9 @@ FROM a_forestcover_mtm7_summary;
 -- Display the invalid geometry in OpenJump or QGIS
 SELECT * FROM a_forestcover_mtm7 WHERE NOT ST_IsValid(geom) AND ST_GeometryType(geom) = 'ST_MultiPolygon';
 
------------------------------------
+---------------------------------
 -- 1.2) Fix the invalid geometry
------------------------------------
+---------------------------------
 UPDATE a_forestcover_mtm7 
 SET geom = ST_MakeValid(geom) 
 WHERE NOT ST_IsValid(geom) AND ST_GeometryType(geom) = 'ST_MultiPolygon';
@@ -61,6 +62,7 @@ DROP TABLE IF EXISTS a_forestcover_mtm7_summary;
 CREATE TABLE a_forestcover_mtm7_summary AS
 SELECT * FROM ST_GeoTableSummary('public', 'a_forestcover_mtm7', 'geom', 'gid', 10, 'all');
 
+-- Display
 SELECT * FROM a_forestcover_mtm7_summary;
 
 -- Display the overlaps in OpenJump or QGIS
@@ -68,7 +70,7 @@ SELECT * FROM a_forestcover_mtm7_summary
 WHERE summary = '3';
 
 -- Alternative way to check for overlaps. 
--- Compare the sum of the individual areas with the area of the merged polygons. 24s
+-- Compare the sum of the individual areas with the area of the merged polygons (24s)
 SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM a_forestcover_mtm7
 UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM a_forestcover_mtm7;
@@ -77,7 +79,7 @@ SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM a_forestcover_mt
 SELECT sum(countsandareas) FROM a_forestcover_mtm7_summary
 WHERE summary = '3';
 
-------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
 -- 2.1) Fix (remove) Overlapping Geometry Parts. 
 --      EXTERIOR RINGS METHOD by deconstructing/reconstructing the polygons.
 --      https://trac.osgeo.org/postgis/wiki/UsersWikiExamplesOverlayTables
@@ -87,8 +89,9 @@ WHERE summary = '3';
 --      Remove every holes from multipolygons as well (if that's what you want).
 --      No index required.
 --      Link to original attribute have to be constructed spatially.
-------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
 
+-- *** Actual Query - Fix overlaps EXTERIOR RINGS METHOD (3 steps)
 -- 1) Extract all the polygons exterior rings and make them simple polygons (holes are lost)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_ring_method_rings;
 CREATE TABLE b_forest_no_overlaps_mtm7_ring_method_rings AS
@@ -101,7 +104,7 @@ FROM a_forestcover_mtm7;
 -- 2) Index them so we can join back with them later to reassign the attributes to the final (fixed) coverage
 CREATE INDEX ON b_forest_no_overlaps_mtm7_ring_method_rings USING gist (geom);
 
--- Create a new table with (almost) no overlaps. 37 minutes
+-- Create a new table with (almost) no overlaps (37 minutes)
 --DROP TABLE If EXISTS b_forest_no_overlaps_mtm7_ring_method_final;
 CREATE TABLE b_forest_no_overlaps_mtm7_ring_method_final AS
 WITH extrings_union AS ( -- 3) Union all the polygons exterior rings together into a single geometry
@@ -111,7 +114,8 @@ WITH extrings_union AS ( -- 3) Union all the polygons exterior rings together in
   SELECT (ST_Dump((SELECT ST_Polygonize(geom) geom FROM extrings_union))).geom geom
 ), polygons_with_ids AS ( -- 5) Join each unique polygon back with the original polygon to get the right attributes (sorted by id DESC)
   SELECT DISTINCT ON (p.geom) p.geom, r.id, r.ctype, r.height
-  FROM  polygons p LEFT JOIN b_forest_no_overlaps_mtm7_ring_method_rings r ON (ST_Within(ST_PointOnSurface(p.geom), r.geom))
+  FROM  polygons p 
+        LEFT JOIN b_forest_no_overlaps_mtm7_ring_method_rings r ON (ST_Within(ST_PointOnSurface(p.geom), r.geom))
   ORDER BY p.geom, id DESC
 ) -- 6) Re-union polygons sharing the same id together
 SELECT id, ctype, height, ST_Union(geom) geom
@@ -123,6 +127,7 @@ GROUP BY id, ctype;
 CREATE TABLE b_forest_no_overlaps_mtm7_ring_method_summary AS
 SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_ring_method_final', 'geom', 'id', 10, 'all');
 
+-- Display
 SELECT * FROM b_forest_no_overlaps_mtm7_ring_method_summary;
 
 -- Gaps are unioned together. Delete them... we will fill them later.
@@ -134,17 +139,17 @@ SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM b_forest_no_overlaps_m
 UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM b_forest_no_overlaps_mtm7_ring_method_final;
 
-------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
 -- 2.2) Fix (remove) Overlapping Geometry Parts. 
---      DIFFERENCE AGGREGATE METHOD by clipping overlapping polygons and merging overlapping parts with the polygon 
---      having the biggest area.
+--      DIFFERENCE AGGREGATE METHOD by clipping overlapping polygons and merging 
+--      overlapping parts with the polygon having the biggest area.
 --
 --      Imperfect: leave some very small overlaps.
 --      Very fast: 24 seconds for 7500 polygons. Index on geometry necessary.
---      Depends on the PostGIS Addons.
-------------------------------------------------------------------------------------------------------------------------
+--      Depends on the PostGIS Add-ons.
+----------------------------------------------------------------------------------
 
--- Create a new table with (almost) no overlaps. 24s
+-- *** Actual Query - Remove overlaps DIFFERENCE AGGREGATE METHOD (24s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_diff_method;
 CREATE TABLE b_forest_no_overlaps_mtm7_diff_method AS 
 SELECT a.gid, a.ctype, a.height, ST_DifferenceAgg(a.geom, b.geom) geom -- Remove, in this polygon, all the overlapping parts from other polygons
@@ -164,7 +169,7 @@ HAVING ST_Area(ST_DifferenceAgg(a.geom, b.geom)) > 0 AND NOT ST_IsEmpty(ST_Diffe
 SELECT * 
 FROM b_forest_no_overlaps_mtm7_diff_method;
 
--- Check areas again. 20s
+-- Check areas again (20s)
 SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM b_forest_no_overlaps_mtm7_diff_method
 UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM b_forest_no_overlaps_mtm7_diff_method;
@@ -180,13 +185,15 @@ SELECT * FROM b_forest_no_overlaps_mtm7_diff_method_summary;
 SELECT sum(countsandareas) FROM b_forest_no_overlaps_mtm7_diff_method_summary
 WHERE summary = '3';
 
-----------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------
 -- 2.3) Fix (remove) Overlapping Geometry Parts. 
 --      SPLIT AGGREGATE METHOD by spliting overlapping polygons and removing duplicates.
 --      Imperfect: leave some very small overlaps.
 --      Fast: 60 seconds for 7500 polygons. Index on geometry necessary.
---      Depends on the PostGIS Addons.
-----------------------------------------------------------------------------------------------
+--      Depends on the PostGIS Add-ons.
+-----------------------------------------------------------------------------------------
+
+-- *** Actual Query - Remove overlaps SPLIT AGGREGATE METHOD (60s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_split_method;
 CREATE TABLE b_forest_no_overlaps_mtm7_split_method AS
 SELECT DISTINCT ON (geom) 
@@ -223,15 +230,15 @@ SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM b_forest_no_over
 SELECT sum(countsandareas) FROM b_forest_no_overlaps_mtm7_split_method_summary
 WHERE summary = '3';
 
------------------------------------------------------------------------
+-----------------------------------------------------
 -- 2.4) Parallelize the overlap removal method (2.3)
------------------------------------------------------------------------
+-----------------------------------------------------
 
 -- Add a column with the area BEFORE splitting the coverage so we can merge overlaping part with the polygon having the biggest area BEFORE splitting
 ALTER TABLE a_forestcover_mtm7 ADD COLUMN area double precision;
 UPDATE a_forestcover_mtm7 SET area = ST_Area(geom);
 
--- Split the forest cover into tiles. 12s
+-- *** Actual Query - Split the forest cover into tiles (12s)
 --DROP TABLE IF EXISTS d_forestcover_mtm7_splitted_1000;
 CREATE TABLE d_forestcover_mtm7_splitted_1000 AS
 SELECT gid, ctype, height, area, (sp).*
@@ -259,7 +266,8 @@ WHERE ST_GeometryType(geom) = 'ST_GeometryCollection';
 SELECT min(x) xmin, max(x) xmax
 FROM d_forestcover_mtm7_splitted_1000;
 
--- Remove overlaps group of tile by group of tiles on different processors (each query takes less than 10s)
+-- *** Actual Query - Remove overlaps group of tile by group of tiles on 
+-- many processors (less than 10s each)
 CREATE TABLE d_forestcover_mtm7_splitted_1000_no_overlaps_248_253 AS
 --CREATE TABLE d_forestcover_mtm7_splitted_1000_no_overlaps_253_258 AS
 --CREATE TABLE d_forestcover_mtm7_splitted_1000_no_overlaps_258_263 AS
@@ -267,7 +275,7 @@ CREATE TABLE d_forestcover_mtm7_splitted_1000_no_overlaps_248_253 AS
 WITH tiles AS (
   SELECT * 
   FROM d_forestcover_mtm7_splitted_1000
-WHERE x >= 248 AND x < 253
+  WHERE x >= 248 AND x < 253
 --WHERE x >= 253 AND x < 258
 --WHERE x >= 258 AND x < 263
 --WHERE x >= 263 AND x < 268
@@ -309,7 +317,7 @@ SELECT * FROM d_forestcover_mtm7_splitted_1000_nooverlaps_summary;
 -- 3) Gap filling.
 ------------------------------------------------------
 
--- Identify gaps, 21 sec.
+-- *** Actual Query - Identify gaps (21s)
 --DROP TABLE IF EXISTS e_forest_gaps_mtm7;
 CREATE TABLE e_forest_gaps_mtm7 AS
 SELECT geom, ST_Area(geom) area
@@ -323,7 +331,7 @@ ORDER BY area DESC;
 SELECT * 
 FROM e_forest_gaps_mtm7;
 
--- Remove gaps. 23 secs.
+-- *** Actual Query - Remove gaps (23s)
 --DROP TABLE IF EXISTS e_forest_no_gaps_mtm7;
 CREATE TABLE e_forest_no_gaps_mtm7 AS
 WITH gaps AS (
@@ -334,12 +342,14 @@ WITH gaps AS (
  WHERE path[1] != 1 AND ST_Area(geom) > 0.000001 -- Do not select the external big polygon
 ), assignations AS ( -- 2) Find the biggest geometry touching every gaps
  SELECT DISTINCT ON (gaps.geom) ov.gid ovid, gaps.geom
- FROM b_forest_no_overlaps_mtm7_diff_method ov, gaps
+ FROM b_forest_no_overlaps_mtm7_diff_method ov, 
+      gaps
  WHERE ST_Intersects(ov.geom, gaps.geom)
  ORDER BY gaps.geom, ST_Area(ov.geom) DESC
 ) -- 3) Union every original geometry with its possibly associated gap
 SELECT ov.gid, ov.ctype, ov.height, ST_Union(CASE WHEN ass.geom IS NULL THEN ov.geom ELSE ST_Union(ov.geom, ass.geom) END) geom
-FROM b_forest_no_overlaps_mtm7_diff_method ov LEFT OUTER JOIN assignations ass ON (ov.gid = ass.ovid)
+FROM b_forest_no_overlaps_mtm7_diff_method ov 
+     LEFT OUTER JOIN assignations ass ON (ov.gid = ass.ovid)
 GROUP BY ov.gid, ov.ctype, ov.height;
 
 -- Compare sum of areas with exterior ring of union
@@ -386,9 +396,9 @@ SELECT *
 FROM e_forest_gaps_mtm7_2;
 
 
------------------------------------------------------------------------
+-------------------------------------------
 -- 4.1 Extraction from POLYGONS for POINTS
------------------------------------------------------------------------
+-------------------------------------------
 -- Load the Montmorency Forest limits (to create random points inside)
 -- shp2pgsql -s 4269:32187 -W LATIN1 -I "D:\Formations\PostGIS\04 - FOSS4G 2017\Attendees\data\limits_FM\limits_FM.shp" "a_limits_fm_mtm7" | psql -U "postgres" -d "FOSS4G2017"
 -- -s reproject from WGS 84 to MTM 7
@@ -399,9 +409,9 @@ FROM e_forest_gaps_mtm7_2;
 SELECT * 
 FROM a_limits_fm_mtm7;
 
------------------------------------------------------------------------
+-------------------------------------------------------------------------
 -- 4.1.1) Extraction from POLYGONS for POINTS (with possible duplicates)
------------------------------------------------------------------------
+-------------------------------------------------------------------------
 -- Generate random points in the limits_fm
 --DROP TABLE IF EXISTS f_random_points_fm_1000_mtm7;
 CREATE TABLE f_random_points_fm_1000_mtm7 AS
@@ -423,9 +433,9 @@ FROM f_random_points_fm_1000_mtm7;
 --DROP TABLE IF EXISTS f_random_points_fm_1000_cover_mtm7;
 CREATE TABLE f_random_points_fm_1000_cover_mtm7 AS
 SELECT p.id, 
-       f.ctype ctype, 
+       f.ctype, 
        f.height, 
-       p.geom geom
+       p.geom
 FROM f_random_points_fm_1000_mtm7 p, 
      e_forest_no_gaps_mtm7 f
 WHERE ST_Intersects(p.geom, f.geom);
@@ -433,23 +443,25 @@ WHERE ST_Intersects(p.geom, f.geom);
 -- Make sure there are no duplicates (one point could intersect with two polygons at the same time)
 SELECT ST_ColumnIsUnique('f_random_points_fm_1000_cover_mtm7', 'id');
 
------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------
 -- 4.1.2) Extraction from POLYGONS for POINTS (with no duplicates)
------------------------------------------------------------------------------------------------------------
--- If by any bad chance (you really have to be unlucky!), one point intersects with two or more polygons 
--- at the same time you can choose between the many duplicates with a DISTINCT clause...
+-------------------------------------------------------------------
+-- If by any bad chance (you really have to be unlucky!), one point 
+-- intersects with two or more polygons at the same time you can 
+-- choose between the many duplicates with a DISTINCT clause...
 
--- Make one point fall eactly on the vextex of two polygons
+-- Make one point fall eactly on the vextex of more than one polygons
 UPDATE f_random_points_fm_1000_mtm7 SET geom = ST_SetSRID(ST_MakePoint(255032, 5236276), 32187) WHERE id = 540;
 
 -- Re-extract the cover type value for each POINT
 --DROP TABLE IF EXISTS f_random_points_fm_1000_cover_mtm7_2;
 CREATE TABLE f_random_points_fm_1000_cover_mtm7_2 AS
 SELECT p.id, 
-       f.ctype ctype, 
+       f.ctype, 
        f.height, 
-       p.geom geom
-FROM f_random_points_fm_1000_mtm7 p, e_forest_no_gaps_mtm7 f
+       p.geom
+FROM f_random_points_fm_1000_mtm7 p, 
+     e_forest_no_gaps_mtm7 f
 WHERE ST_Intersects(p.geom, f.geom);
 
 -- Make sure there are no duplicates (one point could intersect with two polygons at the same time)
@@ -466,13 +478,14 @@ SELECT *
 FROM f_random_points_fm_1000_cover_mtm7_2
 WHERE id = 540;
 
--- So a better extraction query to avoid duplicates in the first place would have been:
+-- *** Actual Best Practice Query - So a better extraction query to avoid 
+-- duplicates in the first place would have been:
 --DROP TABLE IF EXISTS f_random_points_fm_1000_cover_mtm7_3;
 CREATE TABLE f_random_points_fm_1000_cover_mtm7_3 AS
 SELECT DISTINCT ON (p.id) p.id, 
-                          f.ctype ctype, 
+                          f.ctype, 
                           f.height, 
-                          p.geom geom
+                          p.geom
 FROM f_random_points_fm_1000_mtm7 p, 
      e_forest_no_gaps_mtm7 f
 WHERE ST_Intersects(p.geom, f.geom)
@@ -484,16 +497,17 @@ SELECT *
 FROM f_random_points_fm_1000_cover_mtm7_3
 WHERE id = 540;
 
--- Another option is to aggregate the numeric values from all duplicates. 
--- We can take the min, the max or the average for the numeric values and 
--- the max or min for the literal values.
+-- *** Actual Best Practice Query - Another option is to aggregate the 
+-- numeric values from all duplicates. We can take the min, the max or the 
+-- average for the numeric values and the max or min for the literal values.
 --DROP TABLE IF EXISTS f_random_points_fm_1000_cover_mtm7_4;
 CREATE TABLE f_random_points_fm_1000_cover_mtm7_4 AS
 SELECT p.id, 
        min(f.ctype) ctype, 
-       avg(f.height), 
-       p.geom geom
-FROM f_random_points_fm_1000_mtm7 p, e_forest_no_gaps_mtm7 f
+       avg(f.height) height, 
+       p.geom
+FROM f_random_points_fm_1000_mtm7 p, 
+     e_forest_no_gaps_mtm7 f
 WHERE ST_Intersects(p.geom, f.geom)
 GROUP BY p.id, p.geom;
 
@@ -503,9 +517,9 @@ SELECT *
 FROM f_random_points_fm_1000_cover_mtm7_4
 WHERE id = 540;
 
------------------------------------------------------
+----------------------------------------------
 -- 4.2) Extraction from POLYGONS for POLYGONS 
------------------------------------------------------
+----------------------------------------------
 -- Create a 100m buffer table and index it. 30000 m square
 --DROP TABLE IF EXISTS g_random_buffers_fm_1000_mtm7;
 CREATE TABLE g_random_buffers_fm_1000_mtm7 AS
@@ -519,15 +533,16 @@ CREATE INDEX g_random_buffers_fm_1000_mtm7_geom_gist ON g_random_buffers_fm_1000
 SELECT * 
 FROM g_random_buffers_fm_1000_mtm7;
 
------------------------------------------------------------------------
+---------------------------------------------------------------
 -- 4.2.1) Extraction nominal values from POLYGONS for POLYGONS
------------------------------------------------------------------------
--- Extract the area covered and the proportion of each type of forest cover for each buffer. 11s
+---------------------------------------------------------------
+-- *** Actual Query - Extract the area covered and the proportion of each type of forest cover for each buffer (11s)
 --DROP TABLE IF EXISTS g_random_buffers_fm_coverarea_1000_mtm7;
 CREATE TABLE g_random_buffers_fm_coverarea_1000_mtm7 AS
 WITH buffer_parts AS (
   SELECT buf.id, ctype, ST_Area(buf.geom) bufferarea, ST_Intersection(buf.geom, c.geom) geom
-  FROM g_random_buffers_fm_1000_mtm7 buf, a_forestcover_mtm7 c
+  FROM g_random_buffers_fm_1000_mtm7 buf, 
+       a_forestcover_mtm7 c
   WHERE ST_Intersects(buf.geom, c.geom)
 )
 SELECT id, 
@@ -543,17 +558,18 @@ ORDER BY id, area DESC, ctype;
 SELECT * 
 FROM g_random_buffers_fm_coverarea_1000_mtm7;
 
---------------------------------------------------------------------------------
+--------------------------------------------------------------------------
 -- 4.2.2) Extraction of quantitative summaries from POLYGONS for POLYGONS
---------------------------------------------------------------------------------
--- Extract the area weigted forest cover height for each buffer using ST_AreaWeightedSummaryStats(). 5s
+--------------------------------------------------------------------------
+-- *** Actual Query - Extract the area weigted forest cover height for each buffer using ST_AreaWeightedSummaryStats() (5s)
 --DROP TABLE IF EXISTS g_random_buffers_fm_wmheight_1000_mtm7;
 CREATE TABLE g_random_buffers_fm_wmheight_1000_mtm7 AS
 WITH polygon_parts_and_areas AS (
   SELECT buf.id, 
          height, 
          ST_Intersection(fc.geom, buf.geom) geom
-  FROM a_forestcover_mtm7 fc, g_random_buffers_fm_1000_mtm7 buf
+  FROM a_forestcover_mtm7 fc, 
+       g_random_buffers_fm_1000_mtm7 buf
   WHERE ST_Intersects(fc.geom, buf.geom)
 ), area_weighted_summaries AS (
   SELECT id, 
@@ -570,9 +586,9 @@ FROM area_weighted_summaries;
 SELECT * 
 FROM g_random_buffers_fm_wmheight_1000_mtm7;
 
---------------------------------------------
--- 5) Extraction from RASTER
---------------------------------------------
+---------------------------------------
+-- 5) Extraction from RASTER coverages
+---------------------------------------
 -- Load elevation raster files covering the Montmorency Forest in-db. 4m
 -- Pixel size is 60m x 100m.
 -- Elevation rasters are SRTM tiles downloaded from http://srtm.csi.cgiar.org/SELECTION/inputCoord.asp
@@ -611,23 +627,25 @@ WHERE rid = 194265;
 SELECT nspname || '.' || relname AS "relation",
        pg_size_pretty(pg_total_relation_size(C.oid)) AS "total_size"
 FROM pg_class C
-LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+     LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
 WHERE nspname NOT IN ('pg_catalog', 'information_schema')
       AND C.relkind <> 'i'
       AND nspname !~ '^pg_toast'
 ORDER BY pg_total_relation_size(C.oid) DESC
 LIMIT 50;
 
---------------------------------------------
+------------------------------------------
 -- 5.1) Extraction from RASTER for POINTS 
---------------------------------------------
--- Extract the elevation for each point. 3s
+------------------------------------------
+
+-- *** Actual Query - Extract the elevation for each point (3s)
 --DROP TABLE IF EXISTS h_random_points_fm_1000_elev_mtm7;
 CREATE TABLE h_random_points_fm_1000_elev_mtm7 AS
 SELECT id, 
        geom, 
-       avg(ST_Value(rast, ST_Transform(geom, 4326))) elev -- Get the pixel value under the projected point (or the average of elevations if the point fall on the border of many pixels)
-FROM f_random_points_fm_1000_mtm7, a_elevation_fm_10x10_wgs84
+       avg(ST_Value(rast, ST_Transform(geom, 4326))) elev -- Get the pixel value under the point projected to the raster CS (actually the average of elevations in case the point fall on the border of many pixels)
+FROM f_random_points_fm_1000_mtm7, 
+     a_elevation_fm_10x10_wgs84
 WHERE ST_Intersects(rast, ST_Transform(geom, 4326)) -- Check if the tile extent intersects with the projected geometry
 GROUP BY id, geom;
 
@@ -635,9 +653,9 @@ GROUP BY id, geom;
 SELECT id, elev, ST_Transform(geom, 4326) geom
 FROM h_random_points_fm_1000_elev_mtm7;
 
------------------------------------------------------------------------------
+---------------------------------------------------------------------------
 -- Why do we reproject geometries to the raster srid and not the opposite?
------------------------------------------------------------------------------
+---------------------------------------------------------------------------
 -- Reproject the raster tiles
 SELECT rid, ST_Transform(rast, 32187)::geometry geom
 FROM a_elevation_fm_100x100_wgs84;
@@ -670,30 +688,33 @@ CREATE TABLE h_random_points_fm_1000_elev_mtm7_2 AS
 SELECT id, 
        geom, 
        avg(ST_Value(rast, geom)) elev -- Get the pixel value under the projected point
-FROM f_random_points_fm_1000_mtm7, a_elevation_fm_100x100_mtm7
+FROM f_random_points_fm_1000_mtm7, 
+     a_elevation_fm_100x100_mtm7
 WHERE ST_Intersects(rast, geom) -- Check if the tile extent intersects with the projected geometry
 GROUP BY id, geom;
 
----------------------------------------------------------------
+------------------------------------------------------------------------------
 -- 5.2) Extraction from RASTER for POLYGONS (VECTOR MODE)
 --      - Raster tiles are vectorized and then intersected with the polygons
 --      - Good when polygon sizes are relatively smaller than the pixel size
 --        or when the vector coverage is composed of lines
 --      - Slower than the raster mode, but more (too much) precise.
----------------------------------------------------------------
--- Intersect each buffer with the elevation in vector mode. 2 minutes
+------------------------------------------------------------------------------
+
+-- *** Actual Query - Intersect each buffer with the elevation in vector mode (80s)
 --DROP TABLE IF EXISTS h_random_buffers_fm_1000_elev_mtm7;
 CREATE TABLE h_random_buffers_fm_1000_elev_mtm7 AS
 WITH rast_geom_inter AS (
   SELECT id, 
-         ST_Intersection(rast, ST_Transform(geom, 4326)) gv -- Intersect the vectorized tile with the geometry returning geomval records
-  FROM g_random_buffers_fm_1000_mtm7, a_elevation_fm_20x20_wgs84
+         ST_Intersection(rast, ST_Transform(geom, 4326)) geomval -- Intersect the vectorized tile with the geometry returning geomval records
+  FROM g_random_buffers_fm_1000_mtm7, 
+       a_elevation_fm_20x20_wgs84
   WHERE ST_Intersects(rast, ST_Transform(geom, 4326)) -- Check if the tile extent intersects with the projected geometry
 )
 SELECT id, 
-       (gv).val elev,
-       ST_Transform((gv).geom, 32187) geom, 
-       ST_Area(ST_Transform((gv).geom, 32187)) area -- Project the geometry in MTM before computing the area
+       (geomval).val elev,
+       ST_Transform((geomval).geom, 32187) geom, 
+       ST_Area(ST_Transform((geomval).geom, 32187)) area -- Project the geometry in MTM before computing the area
 FROM rast_geom_inter;
 
 -- Display as table
@@ -704,18 +725,19 @@ FROM h_random_buffers_fm_1000_elev_mtm7;
 SELECT id, elev, ST_Transform(geom, 4326) geom, area
 FROM h_random_buffers_fm_1000_elev_mtm7;
 
----------------------------------------------------------------
--- 5.2.1) Intersect and aggregate per buffer. 30s
----------------------------------------------------------------
+---------------------------------------------------
+-- 5.2.1) Intersect and aggregate per buffer (30s)
+---------------------------------------------------
 --DROP TABLE IF EXISTS h_random_buffers_fm_1000_stats_wgs84;
 CREATE TABLE h_random_buffers_fm_1000_stats_wgs84 AS
 WITH rast_geom_inter AS (
   SELECT id, 
-         ST_Intersection(rast, ST_Transform(geom, 4326)) gv
-  FROM g_random_buffers_fm_1000_mtm7, a_elevation_fm_10x10_wgs84
+         ST_Intersection(rast, ST_Transform(geom, 4326)) geomval
+  FROM g_random_buffers_fm_1000_mtm7, 
+       a_elevation_fm_10x10_wgs84
   WHERE ST_Intersects(rast, ST_Transform(geom, 4326))
 )
-SELECT id, (ST_AreaWeightedSummaryStats(gv)).* -- Aggregate geomval parts
+SELECT id, (ST_AreaWeightedSummaryStats(geomval)).* -- Aggregate geomval parts into all kinds of summary
 FROM rast_geom_inter
 GROUP BY id;
 
@@ -724,16 +746,17 @@ SELECT *
 FROM h_random_buffers_fm_1000_stats_wgs84;
 
 -- PROBLEM: All the area are computed in degree!
--- SOLUTION: Reproject the intersection parts in 32187 before aggregating...
+-- SOLUTION: *** Actual Query - Reproject the intersection parts in 32187 before aggregating... (30s)
 --DROP TABLE IF EXISTS h_random_buffers_fm_1000_stats_wgs84;
 CREATE TABLE h_random_buffers_fm_1000_stats_wgs84 AS
 WITH rast_geom_inter AS (
   SELECT id, 
-         ST_Intersection(rast, ST_Transform(geom, 4326)) gv
-  FROM g_random_buffers_fm_1000_mtm7, a_elevation_fm_10x10_wgs84
+         ST_Intersection(rast, ST_Transform(geom, 4326)) geomval
+  FROM g_random_buffers_fm_1000_mtm7, 
+       a_elevation_fm_10x10_wgs84
   WHERE ST_Intersects(rast, ST_Transform(geom, 4326))
 )
-SELECT id, (ST_AreaWeightedSummaryStats(ST_Transform((gv).geom, 32187), (gv).val)).* -- Aggregate geomval parts
+SELECT id, (ST_AreaWeightedSummaryStats(ST_Transform((geomval).geom, 32187), (geomval).val)).* -- Aggregate geomval parts
 FROM rast_geom_inter
 GROUP BY id;
 
@@ -741,16 +764,16 @@ GROUP BY id;
 SELECT * 
 FROM h_random_buffers_fm_1000_stats_wgs84;
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------------
 -- 5.3) Extraction from RASTER for POLYGONS (RASTER MODE with ST_Clip())
 --      - Raster tiles are clipped to the polygon extent and then summarized
 --      - Good when polygon sizes are much bigger than the pixel size
 --      - Works only when extracting for polygons 
 --      - Faster than the vector mode, but less precise (pixels are not cut, 
 --        take all or leave)
-------------------------------------------------------------------------
+-----------------------------------------------------------------------------
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------------
 -- Load the limits of the province of Quebec
 -- shp2pgsql -s 4269 -W LATIN1 -I "D:\Formations\PostGIS\04 - FOSS4G 2017\Attendees\data\limits_QC\limits_QC.shp" "a_limits_qc_nad83" | psql -U "postgres" -d "FOSS4G2017"
 
@@ -758,7 +781,7 @@ FROM h_random_buffers_fm_1000_stats_wgs84;
 SELECT * 
 FROM a_limits_qc_nad83;
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------------
 -- Load elevation raster files covering the province out-db
 -- raster2pgsql -R -F -I -C -x "D:\Formations\PostGIS\04 - FOSS4G 2017\Attendees\data\srtm\tif\*.tif" a_elevation_qc_wgs84_out | psql -U postgres -d "FOSS4G2017"
 -- Each pixel is 60m x 100m. There are 13 6000x6000 pixels rasters for a total of 468 000 000 pixels.
@@ -771,19 +794,19 @@ FROM a_elevation_qc_wgs84_out;
 SELECT rast::geometry
 FROM a_elevation_qc_wgs84_out;
 
--- Retile to 46800 100x100 tiles. 500ms
+-- Retile to 46800 100x100 tiles (500ms)
 --DROP TABLE IF EXISTS g_elevation_qc_100x100_wgs84_out;
 CREATE TABLE a_elevation_qc_100x100_wgs84_out AS
 SELECT ST_Tile(rast, 100, 100) rast
 FROM a_elevation_qc_wgs84_out;
 
--- Index it.
+-- Index it
 CREATE INDEX a_elevation_qc_100x100_wgs84_out_rast_gist ON a_elevation_qc_100x100_wgs84_out USING gist (ST_ConvexHull(rast));
 
--- Add a unique identifier to each tile. 3s
+-- Add a unique identifier to each tile (3s)
 SELECT ST_AddUniqueID('a_elevation_qc_100x100_wgs84_out', 'rid', true);
 
--- Add all constraints except the "min extent" one. 7s
+-- Add all constraints except the "min extent" one (7s)
 SELECT AddRasterConstraints('a_elevation_qc_100x100_wgs84_out', 'rast', true, true, true, true, true, true, false, true, true, true, true, false);
 
 -- Display the tiles in OpenJump or QGIS
@@ -796,7 +819,7 @@ FROM a_elevation_qc_100x100_wgs84_out
 WHERE rid = 29701;
 
 ------------------------------------------------------------------------
--- Create one thousand 2000m buffers in the province. 1s
+-- Create one thousand 2000m buffers in the province (1s)
 --DROP TABLE IF EXISTS i_random_buffers_qc_1000_wgs84;
 CREATE TABLE i_random_buffers_qc_1000_wgs84 AS
 SELECT ST_Transform(ST_Buffer(ST_Transform(ST_RandomPoints(ST_Union(geom), 1000, 0), 32187), 2000), 4326) geom
@@ -811,43 +834,46 @@ SELECT ST_AddUniqueID('i_random_buffers_qc_1000_wgs84', 'id', true);
 SELECT *
 FROM i_random_buffers_qc_1000_wgs84;
 
-------------------------------------------------------------------------------------------------
--- Actual query - Clip and summarise the elevation tiles for all 1000 buffers. 5s
-------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------
+-- *** Actual Query - Clip and summarise the elevation tiles for all 1000 buffers (5s)
+---------------------------------------------------------------------------------------
 --DROP TABLE IF EXISTS i_random_buffers_qc_1000_elevstats_wgs84;
 CREATE TABLE i_random_buffers_qc_1000_elevstats_wgs84 AS
 SELECT id, 
        ST_Union(geom) geom, -- Union polygons that were splitted over two tiles or more
        (ST_SummaryStatsAgg(ST_Clip(rast, geom, true), true, 1)).* -- Crop tiles to the extent of the geometry and aggregate the statistics by polygon id
-FROM a_elevation_qc_100x100_wgs84_out, i_random_buffers_qc_1000_wgs84
+FROM a_elevation_qc_100x100_wgs84_out, 
+     i_random_buffers_qc_1000_wgs84
 WHERE ST_Intersects(rast, geom)
 GROUP BY id;
 
--- Display as table
+-- Display
 SELECT * 
 FROM i_random_buffers_qc_1000_elevstats_wgs84;
 
--- Display the clipping of the tiles in OpenJump or QGIS. 17s
+-- Display the clipping of the tiles in OpenJump or QGIS (17s)
 SELECT id, ST_Clip(rast, geom, true)::geometry
-FROM g_elevation_qc_100x100_wgs84_out, i_random_buffers_qc_1000_wgs84
+FROM a_elevation_qc_100x100_wgs84_out, 
+     i_random_buffers_qc_1000_wgs84
 WHERE ST_Intersects(rast, geom);
 
-------------------------------------------------------
--- 6) Elevation Profile
-------------------------------------------------------
+
+-------------------------
+-- 6) Elevation Profiles
+-------------------------
 -- Load the road network
 -- shp2pgsql -s 4269:32187 -W LATIN1 -I "D:\Formations\PostGIS\04 - FOSS4G 2017\Attendees\data\roads\roads.shp" "a_roads_fm_mtm7" | psql -U "postgres" -d "FOSS4G2017"
 
--- Add a unique identifier to each route. 1s
+-- Add a unique identifier to each route (1s)
 SELECT ST_AddUniqueID('a_roads_fm_mtm7', 'id', true, true);
 
 -- Display them in OpenJump or QGIS
 SELECT *
 FROM a_roads_fm_mtm7;
 
-------------------------------------------------------
--- 6.1) Elevation Profile
-------------------------------------------------------
+-----------------------------------------------------
+-- 6.1) Elevation Profiles (no interpolation needed)
+-----------------------------------------------------
 
 -- Create one point every 100m along the main road
 WITH road AS (
@@ -858,7 +884,8 @@ WITH road AS (
 SELECT id, 
        id * 100 length, 
        ST_LineInterpolatePoint(geom, id/(ST_Length(geom)/100)) geom
-FROM generate_series(0, (SELECT ST_Length(geom)/100 FROM road)::int) id, road;
+FROM generate_series(0, (SELECT ST_Length(geom)/100 FROM road)::int) id, 
+     road;
 
 -- Alternative: Create 100 points along the main road
 WITH road AS (
@@ -869,9 +896,10 @@ WITH road AS (
 SELECT id, 
        round((id * ST_Length(geom)::numeric)/99, 1) length, 
        ST_LineInterpolatePoint(geom, id/99.0) geom
-FROM generate_series(0, 99) id, road;
+FROM generate_series(0, 99) id, 
+     road;
 
--- Extract the elevation for each 100 points
+-- *** Actual Best Practice Query - Extract the elevation for all 100 points
 --DROP TABLE IF EXISTS j_elevation_profile_mtm7_main_road;
 CREATE TABLE j_elevation_profile_mtm7_main_road AS
 WITH road AS (
@@ -882,11 +910,13 @@ WITH road AS (
   SELECT id, 
          round((id * ST_Length(geom)::numeric)/99, 1) length, 
          ST_LineInterpolatePoint(geom, id/99.0) geom
-  FROM generate_series(0, 99) id, road
+  FROM generate_series(0, 99) id, 
+       road
 )
 SELECT id, geom, length, 
        ST_Value(rast, ST_Transform(geom, 4326)) elev
-FROM points, a_elevation_fm_10x10_wgs84
+FROM points, 
+     a_elevation_fm_10x10_wgs84
 WHERE ST_Intersects(rast, ST_Transform(geom, 4326));
 
 -- Display in OpenJump or QGIS
@@ -896,7 +926,8 @@ FROM j_elevation_profile_mtm7_main_road;
 -- Display all the pixels underneath the road
 WITH tiles AS (
   SELECT DISTINCT rast
-  FROM a_elevation_fm_10x10_wgs84, j_elevation_profile_mtm7_main_road
+  FROM a_elevation_fm_10x10_wgs84, 
+       j_elevation_profile_mtm7_main_road
   WHERE ST_Intersects(rast, ST_Transform(geom, 4326))
 )
 SELECT (ST_DumpAsPolygons(rast)).*
@@ -905,9 +936,9 @@ FROM tiles;
 -- Export in CSV and create an histogram in Excel
 COPY j_elevation_profile_mtm7_main_road TO '/temp/elevation_profile_main_road.csv' DELIMITER ',' CSV HEADER;
 
-------------------------------------------------------
+-----------------------------------------------
 -- 6.2) Elevation Profile (with interpolation)
-------------------------------------------------------
+-----------------------------------------------
 
 -- Select the longest road part
 SELECT id, ST_Length(geom) length
@@ -937,11 +968,13 @@ WITH road AS (
   SELECT id, 
          round((id * ST_Length(geom)::numeric)/99, 1) length, 
          ST_LineInterpolatePoint(geom, id/99.0) geom
-  FROM generate_series(0, 99) id, road
+  FROM generate_series(0, 99) id, 
+       road
 )
 SELECT id, geom, length, 
        ST_Value(rast, ST_Transform(geom, 4326)) elev
-FROM points, a_elevation_fm_10x10_wgs84
+FROM points, 
+     a_elevation_fm_10x10_wgs84
 WHERE ST_Intersects(rast, ST_Transform(geom, 4326));
 
 -- Export in CSV and create an histogram in Excel
@@ -952,7 +985,7 @@ SELECT SQRT(ST_Area(ST_Transform(ST_PixelAsPolygon(rast, 1, 1), 32187))) size
 FROM a_elevation_fm_10x10_wgs84
 LIMIT 1;
 
--- Extract the elevation for each point
+-- *** Actual Best Practice Query - Extract the elevation for each point (2s)
 --DROP TABLE IF EXISTS j_elevation_profile_mtm7_small_part_with_interp;
 CREATE TABLE j_elevation_profile_mtm7_small_part_with_interp AS
 WITH road AS (
@@ -963,11 +996,13 @@ WITH road AS (
   SELECT id, 
          round((id * ST_Length(geom)::numeric)/99, 1) length, 
          ST_LineInterpolatePoint(geom, id/99.0) geom
-  FROM generate_series(0, 99) id, road
+  FROM generate_series(0, 99) id, 
+       road
 ), rast_geom_inter AS (
   SELECT id, length, geom,
          ST_Intersection(rast, ST_Transform(ST_Buffer(geom, 74/2), 4326)) gv
-  FROM buffers, a_elevation_fm_10x10_wgs84
+  FROM buffers, 
+       a_elevation_fm_10x10_wgs84
   WHERE ST_Intersects(rast, ST_Transform(ST_Buffer(geom, 74/2), 4326))
 )
 SELECT id, geom, length, 
@@ -983,17 +1018,17 @@ FROM j_elevation_profile_mtm7_small_part_with_interp;
 COPY j_elevation_profile_mtm7_small_part_with_interp TO '/temp/elevation_profile_small_part_with_interp.csv' DELIMITER ',' CSV HEADER;
 
 
-------------------------------------------------------
--- 4) Nearest Neighbour
-------------------------------------------------------
--- Generate 3 000 000 random points inside limits_fm. 42s
+---------------------------------------------
+-- 7) Proximity Analysis (Nearest Neighbour)
+---------------------------------------------
+-- Generate 3 000 000 random points inside limits_fm (42s)
 --DROP TABLE IF EXISTS k_random_points_fm_3000000_mtm7;
 CREATE TABLE k_random_points_fm_3000000_mtm7 AS
 SELECT generate_series(1, 3000000) id, 
        ST_RandomPoints(ST_Union(geom), 3000000, 1) geom 
 FROM a_limits_fm_mtm7;
 
--- Add a spatial index on the points. 40s
+-- Add a spatial index on the points (40s)
 CREATE INDEX k_random_points_fm_3000000_mtm7_geom_gist ON k_random_points_fm_3000000_mtm7 USING gist (geom);
 
 -- Add an index on id
@@ -1003,10 +1038,10 @@ CREATE INDEX k_random_points_fm_3000000_mtm7_id ON k_random_points_fm_3000000_mt
 SELECT * 
 FROM k_random_points_fm_3000000_mtm7;
 
-------------------------------------------------------
--- 4.1) Nearest Neighbour - For 1 POINT from 1 000 000 POINTS. Classic method with and without ST_DWithin.
-------------------------------------------------------
--- Display the 1 000 points we will search neighbours for in OpenJump or QGIS
+-----------------------------------------------------------------------------------------------------------
+-- 7.1) Nearest Neighbour - For 1 POINT from 3 000 000 POINTS - Classic method with and without ST_DWithin
+-----------------------------------------------------------------------------------------------------------
+-- Display the 1000 points we will search neighbours for in OpenJump or QGIS
 SELECT * 
 FROM f_random_points_fm_1000_mtm7;
 
@@ -1015,7 +1050,7 @@ SELECT *
 FROM f_random_points_fm_1000_mtm7
 WHERE id = 146;
 
--- Without ST_DWithin(). 2s
+-- With ST_Distance() only, without ST_DWithin() (2s)
 SELECT pointB.geom, 
        pointB.id, 
        ST_Distance(pointA.geom, pointB.geom) dist
@@ -1025,19 +1060,19 @@ WHERE pointA.id = 146
 ORDER BY dist
 LIMIT 3;
 
--- With ST_DWithin(). 30ms
+-- With ST_DWithin() (30ms)
 SELECT pointB.geom, 
        pointB.id, 
        ST_Distance(pointA.geom, pointB.geom) dist
 FROM f_random_points_fm_1000_mtm7 pointA, 
      k_random_points_fm_3000000_mtm7 pointB
 WHERE pointA.id = 146 AND 
-      ST_DWithin(pointA.geom, pointB.geom, 8) -- ST_DWithin() is fast because it uses the index. PROBLEM: Try with id = 673 to realize that 8 meter is not enough. What is enough?
+      ST_DWithin(pointA.geom, pointB.geom, 8) -- Fast because ST_DWithin() uses the index. PROBLEM: Try with id = 673 to realize that 8 meter is not enough. How much is enough?
 ORDER BY dist
 LIMIT 3;
 
 -- Try to find the biggest third smallest distance. Takes a long time (20 minutes) because needs to compute way too many distances (1000 * 3000000).
--- (Can not be written as a Common Table Expressions (WITH statement))
+-- Can not be written as a Common Table Expressions (WITH statement)
 SELECT pointA.*, -- Get the biggest smallest
        (SELECT dist -- Get the third furthest
         FROM (SELECT ST_Distance(pointA.geom, pointB.geom) dist -- Find the four nearest points (include the point itself)
@@ -1050,17 +1085,21 @@ FROM f_random_points_fm_1000_mtm7 pointA
 ORDER BY dist DESC
 LIMIT 1;
 
-------------------------------------------------------
--- 4.2) Nearest Neighbour - For 1 POINT from 1 000 000 POINTS. KNN method.
-------------------------------------------------------
+---------------------------------------------------------------------------
+-- 7.2) Nearest Neighbour - For 1 POINT from 3 000 000 POINTS - KNN method
+---------------------------------------------------------------------------
+
+-- *** Actual Best Practice Query - Find the three first nearest points (PostgreSQL 9.5+)
 SELECT id, 
        geom, 
-       (SELECT geom FROM f_random_points_fm_1000_mtm7 WHERE id = 146) <-> near_point.geom dist
+       (SELECT geom 
+        FROM f_random_points_fm_1000_mtm7 
+        WHERE id = 146) <-> near_point.geom dist -- Try with 673. No problem!
 FROM k_random_points_fm_3000000_mtm7 near_point
 ORDER BY dist
 LIMIT 3;
 
--- Pre PostgreSQL 9.5 equivalent query. When <-> was not returning the true distance.
+-- Legacy pre-PostgreSQL 9.5 equivalent query. When <-> was not returning the true distance.
 SELECT near_point.id, 
        near_point.geom, 
        ST_Distance(point.geom, near_point.geom) dist
@@ -1069,69 +1108,97 @@ FROM f_random_points_fm_1000_mtm7 point,
 WHERE point.id = 146
 ORDER BY (SELECT geom 
           FROM f_random_points_fm_1000_mtm7 
-          WHERE id = 146) <-> near_point.geom -- Try with 673. No problem!
+          WHERE id = 146) <-> near_point.geom 
 LIMIT 3;
 
-------------------------------------------------------
--- 4.3) Nearest Neighbour - For 1000 POINT from 3 000 000 POINTS. KNN method using LATERAL JOIN (PG 9.3+).
-------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------
+-- 7.3) Nearest Neighbour - For 1000 POINT from 3 000 000 POINTS - KNN method using LATERAL JOIN (PostgreSQL 9.3+)
+-------------------------------------------------------------------------------------------------------------------
+
+-- *** Actual Best Practice Query - Find the three first nearest points (PostgreSQL 9.5+)
 SELECT pointA.id, 
        pointA.geom, 
        near_point.id near_id,
        near_point.geom near_geom,
        near_point.dist
-FROM f_random_points_fm_1000_mtm7 pointA, LATERAL
-     (SELECT pointB.id, 
-             pointB.geom, 
-             pointB.geom <-> pointA.geom dist
-      FROM k_random_points_fm_3000000_mtm7 pointB
-      ORDER BY dist
-      LIMIT 3
-     ) near_point;
+FROM f_random_points_fm_1000_mtm7 pointA, 
+     LATERAL (SELECT pointB.id, 
+                     pointB.geom, 
+                     pointB.geom <-> pointA.geom dist
+              FROM k_random_points_fm_3000000_mtm7 pointB
+              ORDER BY dist
+              LIMIT 3) near_point;
 
 -- Display as table
 SELECT * 
 FROM k_random_points_fm_3nearest_1000_mtm7_lateral;
 
-------------------------------------------------------
--- 4.4) Nearest Neighbour - For 1000 POINT from 6200 POLYLINES.
-------------------------------------------------------
+-- Legacy pre-PostgreSQL 9.5, post 9.3 equivalent query when <-> was returning the centroid distance instead of the true distance.
+SELECT pointA.id, 
+       pointA.geom, 
+       near_point.id near_id,
+       near_point.geom near_geom,
+       near_point.dist
+FROM f_random_points_fm_1000_mtm7 pointA, 
+     LATERAL (SELECT pointB.id, 
+                     pointB.geom, 
+                     ST_Distance(pointA.geom, pointB.geom) dist
+              FROM k_random_points_fm_3000000_mtm7 pointB
+              ORDER BY pointB.geom <-> pointA.geom
+              LIMIT 3) near_point;
+
+-- Legacy pre-PostgreSQL 9.3 equivalent query when there was no LATERAL JOIN.
+SELECT pointA.id, 
+       pointA.geom, 
+       pointB.id near_id,
+       pointB.geom near_geom,
+       ST_Distance(pointA.geom, pointB.geom) dist
+FROM f_random_points_fm_1000_mtm7 pointA, 
+     k_random_points_fm_3000000_mtm7 pointB
+WHERE pointB.id = ANY ((SELECT array(SELECT id FROM k_random_points_fm_3000000_mtm7 -- Construct an array of nearest ids for each point
+                                     ORDER BY geom <-> pointA.geom
+                                     LIMIT 3))::integer[])
+ORDER BY pointA.id, dist;
+
+
+---------------------------------------------------------------
+-- 7.4) Nearest Neighbour - For 1000 POINT from 6200 POLYLINES
+---------------------------------------------------------------
 -- Display all the routes in OpenJump or QGIS
 SELECT * 
 FROM a_roads_fm_mtm7;
 
--- Find the first nearest road. PG 9.5+
+-- *** Actual Best Practice Query - Find the first nearest road (PostgreSQL 9.5+)
 SELECT point.id, 
        point.geom, 
        near_road.id nearest_road_id,
        near_road.geom nearest_road_geom,
        near_road.dist
-FROM f_random_points_fm_1000_mtm7 point, LATERAL
-     (SELECT road.id, 
-             road.geom, 
-             road.geom <-> point.geom dist
-      FROM a_roads_fm_mtm7 road
-      ORDER BY dist
-      LIMIT 1) near_road
-ORDER BY point.id, near_road.dist;
+FROM f_random_points_fm_1000_mtm7 point, 
+     LATERAL (SELECT road.id, 
+                     road.geom, 
+                     road.geom <-> point.geom dist
+              FROM a_roads_fm_mtm7 road
+              ORDER BY dist
+              LIMIT 1) near_road
+ORDER BY point.id;
 
--- Pre-PG 9.5 Two Step Approach. When <-> was not returning the true distance.
+-- Legacy pre-PostgreSQL 9.5 Two Step Approach when <-> was returning the centroid distance instead of the true distance.
 WITH first30bb AS (
   SELECT point.id, 
          point.geom, 
          near_road.nearest_road_id, 
          near_road.geom nearest_road_geom,
          near_road.dist
-  FROM f_random_points_fm_1000_mtm7 point, LATERAL
-       (SELECT road.id nearest_road_id, 
-               road.geom,
-               ST_Distance(road.geom, point.geom) dist
-        FROM a_roads_fm_mtm7 road
-        ORDER BY road.geom <#> point.geom
-        LIMIT 30) near_road
+  FROM f_random_points_fm_1000_mtm7 point, 
+       LATERAL (SELECT road.id nearest_road_id, 
+                       road.geom,
+                       ST_Distance(road.geom, point.geom) dist
+                FROM a_roads_fm_mtm7 road
+                ORDER BY road.geom <#> point.geom
+                LIMIT 30) near_road
   ORDER BY point.id, dist
-),
-ordered AS ( -- Make groups of ordered dist, one for each id
+), ordered AS ( -- Make groups of ordered dist, one for each id
   SELECT *, 
          ROW_NUMBER() OVER (PARTITION BY id ORDER BY dist) rownum 
   FROM first30bb
@@ -1139,10 +1206,30 @@ ordered AS ( -- Make groups of ordered dist, one for each id
 SELECT * 
 FROM ordered WHERE rownum < 2;
 
+-- Legacy pre-PostgreSQL 9.3 Two Step Approach when there was no LATERAL JOIN.
+WITH first30bb AS (
+  SELECT point.id, 
+         point.geom, 
+         near_road2.id nearest_road_id, 
+         near_road2.geom nearest_road_geom,
+         ST_Distance(point.geom, near_road2.geom) dist
+  FROM f_random_points_fm_1000_mtm7 point, 
+       a_roads_fm_mtm7 near_road2
+  WHERE near_road2.id = ANY ((SELECT array(SELECT id FROM a_roads_fm_mtm7 near_road1 -- Find the 30 nearest bounding boxes
+                                          ORDER BY near_road1.geom <#> point.geom
+                                          LIMIT 30))::integer[])
+  ORDER BY point.id, dist
+), ordered AS ( -- Make groups of ordered dist, one for each id
+  SELECT *, 
+         ROW_NUMBER() OVER (PARTITION BY id ORDER BY dist) rownum 
+  FROM first30bb
+) -- Get only the first (nearest) one for each group
+SELECT * 
+FROM ordered WHERE rownum < 2;
 
-------------------------------------------------------
--- 5.1) MapAlgebra - Aggregate RASTERS together.
-------------------------------------------------------
+------------------------------------------------
+-- 8.1) MapAlgebra - Aggregate RASTERS together
+------------------------------------------------
 -- Display the Montmorency Forest in OpenJump or QGIS in WGS84
 SELECT ST_Transform(geom, 4326) geom 
 FROM a_limits_fm_mtm7;
@@ -1159,14 +1246,16 @@ FROM l_limits_fm_200m_mtm7;
 
 -- Display tiles intersecting with Montmorency Forest
 SELECT rid, rast::geometry geom
-FROM a_elevation_fm_10x10_wgs84, l_limits_fm_200m_mtm7
+FROM a_elevation_fm_10x10_wgs84, 
+     l_limits_fm_200m_mtm7
 WHERE ST_Intersects(rast, ST_Transform(geom, 4326));
 
--- Merge them into a one row raster.
+-- *** Actual Query - Merge rasters into a one row raster
 --DROP TABLE IF EXISTS l_elevation_fm_wgs84;
 CREATE TABLE l_elevation_fm_wgs84 AS
 SELECT ST_Union(rast) rast
-FROM a_elevation_fm_10x10_wgs84, l_limits_fm_200m_mtm7
+FROM a_elevation_fm_10x10_wgs84, 
+     l_limits_fm_200m_mtm7
 WHERE ST_Intersects(rast, ST_Transform(geom, 4326));
 
 -- Display the extent of the new raster 
@@ -1177,9 +1266,9 @@ FROM l_elevation_fm_wgs84;
 SELECT (ST_DumpAsPolygons(rast)).* 
 FROM l_elevation_fm_wgs84;
 
-------------------------------------------------------
--- 5.2) MapAlgebra - Compute HillShade.
-------------------------------------------------------
+----------------------------------------------
+-- 8.2) MapAlgebra - Compute Hillshade Raster
+----------------------------------------------
 -- Reproject the unioned raster
 --DROP TABLE IF EXISTS m_elevation_fm_mtm7;
 CREATE TABLE m_elevation_fm_mtm7 AS
@@ -1190,7 +1279,7 @@ FROM l_elevation_fm_wgs84;
 SELECT ST_SRID(rast) srid 
 FROM m_elevation_fm_mtm7;
 
--- Display its extent.
+-- Display its extent
 SELECT rast::geometry 
 FROM m_elevation_fm_mtm7;
 
@@ -1202,7 +1291,7 @@ FROM a_limits_fm_mtm7;
 SELECT (ST_DumpAsPolygons(rast)).* 
 FROM m_elevation_fm_mtm7;
 
--- Compute the hillshade raster. 5s
+-- *** Actual Query - Compute hillshade raster (1s)
 --DROP TABLE IF EXISTS m_hillshade_fm_mtm7;
 CREATE TABLE m_hillshade_fm_mtm7 AS
 SELECT ST_HillShade(rast, 1, '32BF', 180) rast
@@ -1212,13 +1301,14 @@ FROM m_elevation_fm_mtm7;
 SELECT (ST_DumpAsPolygons(rast)).* 
 FROM m_hillshade_fm_mtm7;
 
-------------------------------------------------------
--- 5.3) MapAlgebra - Reclass hillshade into 20 classes using ST_MapAlgebra. 100ms
-------------------------------------------------------
+---------------------------------------------------------------------------
+-- 8.3) MapAlgebra - Reclass hillshade into 20 classes using ST_MapAlgebra
+---------------------------------------------------------------------------
 -- Display the min and max of the unclassified hillshade raster.
 SELECT (ST_SummaryStats(rast)).* 
 FROM m_hillshade_fm_mtm7;
 
+-- *** Actual Query - Reclass with ST_Mapalgebra()
 --DROP TABLE IF EXISTS m_hillshade_fm_20class_mtm7_ma;
 CREATE TABLE m_hillshade_fm_20class_mtm7_ma AS
 SELECT ST_SetBandNodataValue(ST_MapAlgebra(rast, '8BUI', 
@@ -1230,22 +1320,24 @@ SELECT ST_SetBandNodataValue(ST_MapAlgebra(rast, '8BUI',
 FROM m_hillshade_fm_mtm7;
 
 -- Compare the metadata before and after. Look at the pixel types and nodatavalue.
-SELECT (ST_Metadata(rast)).*, (ST_BandMetadata(rast)).* FROM m_hillshade_fm_mtm7
+SELECT 'm_hillshade_fm_mtm7', (ST_Metadata(rast)).*, (ST_BandMetadata(rast)).* FROM m_hillshade_fm_mtm7
 UNION ALL
-SELECT (ST_Metadata(rast)).*, (ST_BandMetadata(rast)).* FROM m_hillshade_fm_20class_mtm7_ma
+SELECT 'm_hillshade_fm_20class_mtm7_ma', (ST_Metadata(rast)).*, (ST_BandMetadata(rast)).* FROM m_hillshade_fm_20class_mtm7_ma
 
 -- Compare the statistics before and after reclass. Look at the min and max.
-SELECT (ST_SummaryStats(rast)).* FROM m_hillshade_fm_mtm7
+SELECT 'm_hillshade_fm_mtm7', (ST_SummaryStats(rast)).* FROM m_hillshade_fm_mtm7
 UNION ALL
-SELECT (ST_SummaryStats(rast)).* FROM m_hillshade_fm_20class_mtm7_ma;
+SELECT 'm_hillshade_fm_20class_mtm7_ma', (ST_SummaryStats(rast)).* FROM m_hillshade_fm_20class_mtm7_ma;
 
 -- Display in OpenJump or QGIS
 SELECT (ST_DumpAsPolygons(rast)).* 
 FROM m_hillshade_fm_20class_mtm7_ma;
 
-------------------------------------------------------
--- 5.3) MapAlgebra - Reclass hillshade into 20 classes using ST_Reclass(). 30ms
-------------------------------------------------------
+--------------------------------------------------------------------------
+-- 8.3) MapAlgebra - Reclass hillshade into 20 classes using ST_Reclass()
+--------------------------------------------------------------------------
+
+-- *** Actual, Best Practice Query (30ms)
 --DROP TABLE IF EXISTS m_hillshade_fm_20class_mtm7;
 CREATE TABLE m_hillshade_fm_20class_mtm7 AS
 SELECT ST_Reclass(rast, ROW(1, '0-150:0-10, (150-254: 10-20', '8BUI', 255)::reclassarg) rast
@@ -1265,9 +1357,10 @@ SELECT 'm_hillshade_fm_20class_mtm7_ma', (ST_SummaryStats(rast)).* FROM m_hillsh
 UNION ALL
 SELECT 'm_hillshade_fm_20class_mtm7', (ST_SummaryStats(rast)).* FROM m_hillshade_fm_20class_mtm7;
 
-------------------------------------------------------
--- 6.1) Rasterization - POLYGON to RASTER. ST_AsRaster(), ST_Union() and ST_MapAlgebra() method.
-------------------------------------------------------
+
+----------------------------------------
+-- 9) Rasterization - POLYGON to RASTER
+----------------------------------------
 
 -- Display the forest cover
 SELECT * 
@@ -1292,6 +1385,10 @@ SELECT ST_AddUniqueID('n_elevation_fm_10x10_mtm7', 'rid', true, true);
 SELECT rid, rast::geometry 
 FROM n_elevation_fm_10x10_mtm7;
 
+
+-------------------------------------------------------------------------------------------------
+-- 9.1) Rasterization - POLYGON to RASTER. ST_AsRaster(), ST_Union() and ST_MapAlgebra() method.
+-------------------------------------------------------------------------------------------------
 -- Create one raster per geometry aligned on the elevation grid
 SELECT rid, gid, (ST_DumpAsPolygons(ST_AsRaster(geom, rast, '32BF', height, -9999), 1, false)).*
 FROM a_forestcover_mtm7, 
@@ -1307,18 +1404,22 @@ WITH rast_union AS (
 )
 SELECT (ST_DumpAsPolygons(rast)).*
 FROM rast_union;
-  
--- Rasterize the forest cover height. 4s
+
+-------------------------------------------------------------------------------------
+-- Actual Query - Rasterize the forest cover height (4s)
 -- Steps are:
--- 1) Rasterize every polygon as a single raster with ST_AsRaster()
--- 2) Union all these raster together into a single big raster with ST_Union()
--- 3) Cut this raster to the extent of each tile from the elevation coverage using ST_MapAlgebra() and a JOIN with the elevation coverage
--- 4) Create an empty tile when no rasterized geometry intersect with the tile ST_AddBand(ST_MakeEmptyRaster()) and LEFT JOIN
+-- 1) Rasterize every polygon as a single raster with ST_AsRaster().
+-- 2) Union all these raster together into a single big raster with ST_Union().
+-- 3) Cut this raster to the extent of each tile from the elevation coverage using 
+--    ST_MapAlgebra() and a JOIN with the elevation coverage.
+-- 4) Create an empty tile when no rasterized geometry intersect with the tile 
+--    ST_AddBand(ST_MakeEmptyRaster()) and LEFT JOIN.
 --
 -- Pros: - Fast
 -- Cons: - Only the value at pixel centroids can be extracted (GDAL)
---       - Only basic metrics (like the means of values) can be computed when many pixels overlaps (with ST_Union)
--- 
+--       - Only basic metrics (like the means of values) can be computed when many 
+--         pixels overlaps (with ST_Union).
+-------------------------------------------------------------------------------------
 --DROP TABLE IF EXISTS n_forestheight_fm_10x10_mtm7;
 CREATE TABLE n_forestheight_fm_10x10_mtm7 AS
 WITH forestrast AS (
@@ -1341,7 +1442,8 @@ SELECT a.rid,
          WHEN b.rid IS NULL THEN ST_AddBand(ST_MakeEmptyRaster(a.rast), '32BF'::text, -9999, -9999)
          ELSE b.rast
        END rast
-FROM n_elevation_fm_10x10_mtm7 a LEFT OUTER JOIN forestrast b 
+FROM n_elevation_fm_10x10_mtm7 a 
+     LEFT OUTER JOIN forestrast b 
 ON a.rid = b.rid;
 
 -- Display tiles in OpenJump or QGIS
@@ -1352,17 +1454,21 @@ FROM n_forestheight_fm_10x10_mtm7;
 SELECT (ST_DumpAsPolygons(rast)).* 
 FROM n_forestheight_fm_10x10_mtm7;
 
-------------------------------------------------------
--- 6.2) Rasterization - POLYGON to RASTER. PostGIS Addons ST_ExtractToRaster() method.
-------------------------------------------------------
--- Rasterize using PostGIS Addons ST_ExtractToRaster(). 26s
--- Each pixel is vectorized and intersected with the vector coverage extracting metrics following the specified method.
+----------------------------------------------------------------------------------------
+-- 9.2) Rasterization - POLYGON to RASTER. PostGIS Add-ons ST_ExtractToRaster() method.
+----------------------------------------------------------------------------------------
+-- Rasterize using PostGIS Add-ons ST_ExtractToRaster()
 --
--- Pros: - Many metrics are already implemented (look at the PostGIS Addons file)
+-- Each pixel is vectorized and intersected with the vector coverage extracting metrics 
+-- following the specified method.
+--
+-- Pros: - Many metrics are already implemented (look at the PostGIS Add-ons file)
 --       - Easy to add more metrics
 --       - Metrics can be based on the contriod of the pixel or on its extent
 -- Cons: - Slower than the ST_AsRaster(), ST_Union() and ST_MapAlgebra() method.
---
+----------------------------------------------------------------------------------------
+
+-- *** Actual, Best Practice Query (26s)
 --DROP TABLE IF EXISTS o_forestheight_fm_10x10_mergedbiggest_mtm7;
 CREATE TABLE o_forestheight_fm_10x10_mergedbiggest_mtm7 AS
 SELECT rid, ST_ExtractToRaster( 
@@ -1381,10 +1487,65 @@ SELECT rid, (ST_DumpAsPolygons(rast)).*
 FROM o_forestheight_fm_10x10_mergedbiggest_mtm7
 ORDER BY rid;
 
-------------------------------------------------------
--- 5.5) MapAlgebra - Add a RASTER to another RASTER.
-------------------------------------------------------
--- Add the cover height to the elevation only when the tiles perfectly overlap. 2s
+-----------------------------------------------------------------------------
+-- Create an index coverage tiled and aligned on the same, previous coverage
+
+-- Test ST_CreateIndexRaster() - Default
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(ST_MakeEmptyRaster(10, 10, 0.0, 0.0, 1.0)))).*;
+
+-- Test ST_CreateIndexRaster() - rowfirst = false - rows are assigned first
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(ST_MakeEmptyRaster(10, 10, 0.0, 0.0, 1.0), '8BUI', null, null, null, false))).*;
+
+-- Test ST_CreateIndexRaster() - startvalue = 1 - start at 1 instead of 0
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(ST_MakeEmptyRaster(10, 10, 0.0, 0.0, 1.0), '8BUI', 1, null, null, false))).*;
+
+-- Test ST_CreateIndexRaster() - incwithx  = false - decrement along the X axis instead of incrementing
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(ST_MakeEmptyRaster(10, 10, 0.0, 0.0, 1.0), '8BUI', 1, false, null, false))).*;
+
+-- Test ST_CreateIndexRaster() - rowscanorder  = false - row-prime scan instead of row scan
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(ST_MakeEmptyRaster(10, 10, 0.0, 0.0, 1.0), '8BUI', 1, false, null, false, false))).*;
+
+-- Test ST_CreateIndexRaster() - colinc  = 100 - increment columns by 100 instead of by height - must also set rowinc to a value > 900
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(ST_MakeEmptyRaster(10, 10, 0.0, 0.0, 1.0), '16BUI', 1, false, null, false, false, 100))).*;
+
+-- Display an index raster for the whole raster coverage
+SELECT (ST_DumpAsPolygons(ST_CreateIndexRaster(rast))).* rast 
+FROM m_elevation_fm_mtm7;
+
+-- *** Actual Query - Create an index coverage tiled and aligned on the same, previous coverage
+--DROP TABLE IF EXISTS o_index_raster_mtm7;
+CREATE TABLE o_index_raster_mtm7 AS
+SELECT rast
+FROM (SELECT ST_Tile(ST_CreateIndexRaster(rast), 10, 10) rast 
+      FROM m_elevation_fm_mtm7) foo,
+     l_limits_fm_200m_mtm7
+WHERE ST_Intersects(rast, geom);
+
+-- Index it.
+CREATE INDEX o_index_raster_mtm7_rast_gist ON o_index_raster_mtm7 USING gist (ST_ConvexHull(rast));
+
+-- Add an id.
+SELECT ST_AddUniqueID('o_index_raster_mtm7', 'rid', true, true);
+
+-- Display tiling
+SELECT rid, rast::geometry 
+FROM o_index_raster_mtm7;
+
+-- Display pixels
+SELECT (ST_DumpAsPolygons(rast)).* 
+FROM o_index_raster_mtm7;
+
+-- Make sure every index is unique
+SELECT id, count(*)
+FROM (SELECT (ST_DumpAsPolygons(rast)).val id 
+      FROM o_index_raster_mtm7) foo 
+GROUP BY id
+HAVING count(*) > 1;
+
+-----------------------------------------------------------------------
+-- 8.5) MapAlgebra - Add a RASTER coverage to another RASTER coverage.
+-----------------------------------------------------------------------
+-- *** Actual Query - Add the cover height to the elevation only when the tiles perfectly overlap (2s)
 --DROP TABLE IF EXISTS p_canopyheight_10x10_mtm7_ma;
 CREATE TABLE p_canopyheight_10x10_mtm7_ma AS
 SELECT ST_MapAlgebra(e.rast, fc.rast, '[rast1] + [rast2]', '32BF', 'INTERSECTION', '[rast2]', '[rast1]') rast
@@ -1396,7 +1557,7 @@ WHERE ST_UpperLeftX(e.rast) = ST_UpperLeftX(fc.rast) AND ST_UpperLeftY(e.rast) =
 SELECT (ST_DumpAsPolygons(rast, 1, false)).* 
 FROM p_canopyheight_10x10_mtm7_ma;
 
--- Samething but with ST_Union(). 150 ms.
+-- *** Actual Query - Samething but with ST_Union()
 --DROP TABLE IF EXISTS p_canopyheight_10x10_mtm7_union;
 CREATE TABLE p_canopyheight_10x10_mtm7_union AS
 SELECT ST_Union(rast, 'SUM') rast 
