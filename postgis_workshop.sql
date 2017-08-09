@@ -1,7 +1,7 @@
 ﻿--------------------------------------------
 -- Advanced Spatial Analysis with PostGIS
 -- Pierre Racine
--- Version 2.0.2, August 2017
+-- Version 2.0.3, August 2017
 --------------------------------------------
 -- Start the PostgreSQL server
 -- Start PgAdmin III
@@ -33,7 +33,8 @@ SELECT *
 FROM a_forestcover_mtm7;
 
 -------------------------------------------------------------------------------------------------
--- Load the PostGIS Add-ons (for ST_GeoTableSummary() and others later) and run the test file...
+-- Load the PostGIS Add-ons v. 1.35+ (for ST_GeoTableSummary() and others later) and run the test file...
+-- https://github.com/pedrogit/postgisaddons/releases
 -------------------------------------------------------------------------------------------------
 
 ---------------------------------------------------------------------------
@@ -51,7 +52,9 @@ SELECT *
 FROM a_forestcover_mtm7_summary;
 
 -- Display the invalid geometry in OpenJump or QGIS
-SELECT * FROM a_forestcover_mtm7 WHERE NOT ST_IsValid(geom) AND ST_GeometryType(geom) = 'ST_MultiPolygon';
+SELECT * 
+FROM a_forestcover_mtm7 
+WHERE NOT ST_IsValid(geom) AND ST_GeometryType(geom) = 'ST_MultiPolygon';
 
 ---------------------------------
 -- 1.2) Fix the invalid geometry
@@ -60,7 +63,7 @@ UPDATE a_forestcover_mtm7
 SET geom = ST_MakeValid(geom) 
 WHERE NOT ST_IsValid(geom) AND ST_GeometryType(geom) = 'ST_MultiPolygon';
 
--- Regenerate the summary (should take longer now that it can analyze the overlaps) and display it
+-- Regenerate the summary (should take longer now that it can analyze the overlaps) (50s)
 DROP TABLE IF EXISTS a_forestcover_mtm7_summary;
 CREATE TABLE a_forestcover_mtm7_summary AS
 SELECT * FROM ST_GeoTableSummary('public', 'a_forestcover_mtm7', 'geom', 'gid', 10, 'all');
@@ -72,6 +75,10 @@ SELECT * FROM a_forestcover_mtm7_summary;
 SELECT * FROM a_forestcover_mtm7_summary
 WHERE summary = '3';
 
+-- Display the gaps in OpenJump or QGIS
+SELECT * FROM a_forestcover_mtm7_summary
+WHERE summary = '4';
+
 -- Alternative way to check for overlaps. 
 -- Compare the sum of the individual areas with the area of the merged polygons (24s)
 SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM a_forestcover_mtm7
@@ -79,8 +86,14 @@ UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM a_forestcover_mtm7;
 
 -- Sum the overlapping areas - 2132m
-SELECT sum(countsandareas) FROM a_forestcover_mtm7_summary
+SELECT sum(countsandareas) 
+FROM a_forestcover_mtm7_summary
 WHERE summary = '3';
+
+-- Sum the gap areas - 2132m
+SELECT sum(countsandareas) 
+FROM a_forestcover_mtm7_summary
+WHERE summary = '4';
 
 ----------------------------------------------------------------------------------
 -- 2.1) Fix (remove) Overlapping Geometry Parts. 
@@ -95,7 +108,7 @@ WHERE summary = '3';
 ----------------------------------------------------------------------------------
 
 -- *** Actual Query - Fix overlaps EXTERIOR RINGS METHOD (3 steps)
--- 1) Extract all the polygons exterior rings and make them simple polygons (holes are lost)
+-- 1) Extract all the polygons exterior rings (holes are lost) and make them simple polygons
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_ring_method_rings;
 CREATE TABLE b_forest_no_overlaps_mtm7_ring_method_rings AS
 SELECT gid id, 
@@ -336,20 +349,6 @@ SELECT * FROM d_forestcover_mtm7_splitted_1000_nooverlaps_summary;
 -- 3) Gap filling.
 ------------------------------------------------------
 
--- *** Actual Query - Identify gaps (21s)
---DROP TABLE IF EXISTS c_forest_gaps_mtm7;
-CREATE TABLE c_forest_gaps_mtm7 AS
-SELECT geom, ST_Area(geom) area
--- Create an extent a bit larger than the full extent of the coverage and remove the union of all geometries from it
-FROM (SELECT (ST_Dump(ST_Difference(ST_Buffer(ST_SetSRID(ST_Extent(geom)::geometry, min(ST_SRID(geom))), 0.01), ST_Union(geom)))).*
-      FROM b_forest_no_overlaps_mtm7_diff_method) foo
-WHERE path[1] != 1 -- Do not select the external big polygon
-ORDER BY area DESC;
-
--- Display in OpenJump or QGIS
-SELECT * 
-FROM c_forest_gaps_mtm7;
-
 -- *** Actual Query - Remove gaps (23s)
 --DROP TABLE IF EXISTS c_forest_no_gaps_mtm7;
 CREATE TABLE c_forest_no_gaps_mtm7 AS
@@ -400,20 +399,6 @@ SELECT * FROM ST_geoTableSummary('public', 'c_forest_no_gaps_mtm7', 'geom', 'gid
 
 -- Display
 SELECT * FROM c_forest_no_gaps_mtm7_summary;
-
--- Identify gaps in the new table (21s)
---DROP TABLE IF EXISTS c_forest_gaps_mtm7_2;
-CREATE TABLE c_forest_gaps_mtm7_2 AS
-SELECT geom, ST_Area(geom) area
--- Create an extent a bit larger than the full extent of the coverage and remove the union of all geometries from it
-FROM (SELECT (ST_Dump(ST_Difference(ST_Buffer(ST_SetSRID(ST_Extent(geom)::geometry, min(ST_SRID(geom))), 0.01), ST_Union(geom)))).*
-      FROM c_forest_no_gaps_mtm7) foo
-WHERE path[1] != 1 -- Do not select the external big polygon
-ORDER BY area DESC;
-
--- Display in OpenJump or QGIS
-SELECT * 
-FROM c_forest_gaps_mtm7_2;
 
 
 -------------------------------------------
