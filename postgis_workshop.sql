@@ -1,7 +1,7 @@
 ﻿--------------------------------------------
 -- Advanced Spatial Analysis with PostGIS
 -- Pierre Racine
--- Version 2.0.3, August 2017
+-- Version 2.0.4, August 2017
 --------------------------------------------
 -- Start the PostgreSQL server
 -- Start PgAdmin III
@@ -41,7 +41,7 @@ FROM a_forestcover_mtm7;
 -- 1.1) Generate a summary of the topological properties of the forest cover
 ---------------------------------------------------------------------------
 
--- *** Actual Query - Generate table summary (30s)
+-- *** Actual Query - Generate table summary (60s)
 --DROP TABLE IF EXISTS a_forestcover_mtm7_summary;
 CREATE TABLE a_forestcover_mtm7_summary AS
 SELECT * 
@@ -80,7 +80,7 @@ SELECT * FROM a_forestcover_mtm7_summary
 WHERE summary = '4';
 
 -- Alternative way to check for overlaps. 
--- Compare the sum of the individual areas with the area of the merged polygons (24s)
+-- Compare the sum of the individual areas with the area of the merged polygons (45s)
 SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM a_forestcover_mtm7
 UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM a_forestcover_mtm7;
@@ -165,7 +165,7 @@ SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM b_forest_no_over
 --      Depends on the PostGIS Add-ons.
 ----------------------------------------------------------------------------------
 
--- *** Actual Query - Remove overlaps DIFFERENCE AGGREGATE METHOD (24s)
+-- *** Actual Query - Remove overlaps DIFFERENCE AGGREGATE METHOD (60s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_diff_method;
 CREATE TABLE b_forest_no_overlaps_mtm7_diff_method AS 
 SELECT a.gid, a.ctype, a.height, ST_DifferenceAgg(a.geom, b.geom) geom -- Remove, in this polygon, all the overlapping parts from other polygons
@@ -185,18 +185,19 @@ HAVING ST_Area(ST_DifferenceAgg(a.geom, b.geom)) > 0 AND NOT ST_IsEmpty(ST_Diffe
 SELECT * 
 FROM b_forest_no_overlaps_mtm7_diff_method;
 
--- Check areas again (20s)
+-- Check areas again (50s)
 SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM b_forest_no_overlaps_mtm7_diff_method
 UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM b_forest_no_overlaps_mtm7_diff_method;
 
--- Resummarize the table now running only the OVL summary
+-- Resummarize the table now running only the OVL summary (80s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_summary;
 CREATE TABLE b_forest_no_overlaps_mtm7_diff_method_summary AS
-SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_diff_method', 'geom', 'gid', 10, 'ovl');
+SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_diff_method', 'geom', 'gid', 10, 'all');
 
 -- Display
-SELECT * FROM b_forest_no_overlaps_mtm7_diff_method_summary;
+SELECT * FROM b_forest_no_overlaps_mtm7_diff_method_summary
+WHERE summary = '3'
 
 -- Sum the overlapping areas - 7.84806046765884e-008m
 SELECT sum(countsandareas) FROM b_forest_no_overlaps_mtm7_diff_method_summary
@@ -210,7 +211,7 @@ WHERE summary = '3';
 --      Depends on the PostGIS Add-ons.
 -----------------------------------------------------------------------------------------
 
--- *** Actual Query - Remove overlaps SPLIT AGGREGATE METHOD (60s)
+-- *** Actual Query - Remove overlaps SPLIT AGGREGATE METHOD (120s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_split_method;
 CREATE TABLE b_forest_no_overlaps_mtm7_split_method AS
 SELECT DISTINCT ON (geom) 
@@ -227,7 +228,7 @@ WHERE ST_Equals(a.geom, b.geom) OR
 GROUP BY a.gid
 ORDER BY geom, max(ST_Area(a.geom)) DESC;
 
--- Summarize the resulting table
+-- Summarize the resulting table (4s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_split_method_summary;
 CREATE TABLE b_forest_no_overlaps_mtm7_split_method_summary AS
 SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_split_method', 'geom', 'gid');
@@ -235,21 +236,24 @@ SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_split_meth
 -- Display
 SELECT * FROM b_forest_no_overlaps_mtm7_split_method_summary;
 
--- Reummarize the resulting table using id insteasd of gid (32s)
+-- Create a spatial index on the table before summarizing it
+CREATE INDEX b_forest_no_overlaps_mtm7_split_method_geom_idx ON b_forest_no_overlaps_mtm7_split_method USING gist(geom);
+
+-- Resummarize the resulting table using id insteasd of gid (90s)
 --DROP TABLE IF EXISTS b_forest_no_overlaps_mtm7_split_method_summary;
 CREATE TABLE b_forest_no_overlaps_mtm7_split_method_summary AS
-SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_split_method', 'geom', 'id', null, 'all');
+SELECT * FROM ST_GeoTableSummary('public', 'b_forest_no_overlaps_mtm7_split_method', 'geom', 'id', null, 'all', 'gaps');
 
 -- Display in OpenJump or QGIS
 SELECT * 
 FROM b_forest_no_overlaps_mtm7_split_method;
 
--- Check areas again. 20s
+-- Check areas again (42s)
 SELECT 'sum of areas'::text, sum(ST_Area(geom)) area FROM b_forest_no_overlaps_mtm7_split_method
 UNION ALL
 SELECT 'area of union'::text, ST_Area(ST_Union(geom)) area FROM b_forest_no_overlaps_mtm7_split_method;
 
--- Sum the overlapping areas - 1.20575769339967e-008
+-- Sum the overlapping areas - 8.61287082732048e-009
 SELECT sum(countsandareas) FROM b_forest_no_overlaps_mtm7_split_method_summary
 WHERE summary = '3';
 
@@ -257,7 +261,7 @@ WHERE summary = '3';
 -- 2.4) Parallelize the overlap removal method (2.3)
 -----------------------------------------------------
 
--- Add a column with the area BEFORE splitting the coverage so we can merge overlaping part with the polygon having the biggest area BEFORE splitting
+-- Add a column with the area BEFORE splitting the coverage so we can merge overlapping parts with the polygon having the biggest area BEFORE splitting
 ALTER TABLE a_forestcover_mtm7 ADD COLUMN area double precision;
 UPDATE a_forestcover_mtm7 SET area = ST_Area(geom);
 
@@ -271,10 +275,10 @@ FROM (SELECT gid, area, height, ctype, ST_SplitByGrid(geom, 1000) sp
 -- gid is not unique anymore. Add a unique id
 SELECT ST_AddUniqueID('public', 'd_forestcover_mtm7_splitted_1000', 'id');
 
--- Index the geomtries
+-- Index the geometries
 CREATE INDEX ON d_forestcover_mtm7_splitted_1000 USING gist (geom);
 
--- Summarize the table
+-- Summarize the table (120s)
 --DROP TABLE IF EXISTS d_forestcover_mtm7_splitted_1000_summary;
 CREATE TABLE d_forestcover_mtm7_splitted_1000_summary AS
 SELECT * FROM ST_geoTableSummary('public', 'd_forestcover_mtm7_splitted_1000', 'geom', 'id', null, 'all');
@@ -286,7 +290,7 @@ SELECT * FROM d_forestcover_mtm7_splitted_1000_summary;
 UPDATE d_forestcover_mtm7_splitted_1000 SET geom = ST_CollectionExtract(geom, 3)
 WHERE ST_GeometryType(geom) = 'ST_GeometryCollection';
 
--- Resummarize the table
+-- Resummarize the table (120s)
 --DROP TABLE IF EXISTS d_forestcover_mtm7_splitted_1000_summary;
 CREATE TABLE d_forestcover_mtm7_splitted_1000_summary AS
 SELECT * FROM ST_geoTableSummary('public', 'd_forestcover_mtm7_splitted_1000', 'geom', 'id', null, 'all');
@@ -307,7 +311,7 @@ CREATE TABLE d_forestcover_mtm7_splitted_1000_no_overlaps_248_253 AS
 WITH tiles AS (
   SELECT * 
   FROM d_forestcover_mtm7_splitted_1000
-  WHERE x >= 248 AND x < 253
+WHERE x >= 248 AND x < 253
 --WHERE x >= 253 AND x < 258
 --WHERE x >= 258 AND x < 263
 --WHERE x >= 263 AND x < 268
@@ -325,7 +329,7 @@ WHERE a.tid = b.tid AND -- Consider polygons from the same tile only
 GROUP BY a.id, a.gid, a.ctype, a.height
 HAVING ST_Area(ST_DifferenceAgg(a.geom, b.geom)) > 0 AND NOT ST_IsEmpty(ST_DifferenceAgg(a.geom, b.geom));
 
--- Merge all the tables together
+-- Merge all the tables together (5s)
 CREATE TABLE d_forestcover_mtm7_splitted_1000_no_overlaps AS
 SELECT gid, ctype, height, ST_Union(geom) geom
 FROM (SELECT * FROM d_forestcover_mtm7_splitted_1000_no_overlaps_248_253
@@ -338,10 +342,13 @@ FROM (SELECT * FROM d_forestcover_mtm7_splitted_1000_no_overlaps_248_253
      ) foo
 GROUP BY gid, ctype, height;
 
--- Summarize the table
+
+CREATE INDEX ON d_forestcover_mtm7_splitted_1000_no_overlaps USING GIST (geom);
+
+-- Summarize the table (60s)
 --DROP TABLE IF EXISTS d_forestcover_mtm7_splitted_1000_nooverlaps_summary;
 CREATE TABLE d_forestcover_mtm7_splitted_1000_nooverlaps_summary AS
-SELECT * FROM ST_geoTableSummary('public', 'd_forestcover_mtm7_splitted_1000_no_overlaps', 'geom', 'gid', null, 'all');
+SELECT * FROM ST_geoTableSummary('public', 'd_forestcover_mtm7_splitted_1000_no_overlaps', 'geom', 'gid', null, 'all', 'gaps');
 
 SELECT * FROM d_forestcover_mtm7_splitted_1000_nooverlaps_summary;
 
@@ -349,7 +356,7 @@ SELECT * FROM d_forestcover_mtm7_splitted_1000_nooverlaps_summary;
 -- 3) Gap filling.
 ------------------------------------------------------
 
--- *** Actual Query - Remove gaps (23s)
+-- *** Actual Query - Remove gaps (35s)
 --DROP TABLE IF EXISTS c_forest_no_gaps_mtm7;
 CREATE TABLE c_forest_no_gaps_mtm7 AS
 WITH gaps AS (
@@ -375,7 +382,7 @@ GROUP BY ov.gid, ov.ctype, ov.height;
 CREATE TABLE c_forest_union_no_gaps AS
 SELECT ST_Union(geom) geom FROM c_forest_no_gaps_mtm7;
 
---DROP TABLE IF EXISTS c_forest_union_with_gaps;
+--DROP TABLE IF EXISTS c_forest_union_with_gaps; -- (35s)
 CREATE TABLE c_forest_union_with_gaps AS
 SELECT ST_Union(geom) geom FROM b_forest_no_overlaps_mtm7_diff_method;
 
@@ -420,7 +427,7 @@ FROM a_mf_boundary_mtm7;
 -- Generate random points in the MF boundaries
 --DROP TABLE IF EXISTS d_random_points_mf_1000_mtm7;
 CREATE TABLE d_random_points_mf_1000_mtm7 AS
-SELECT ST_RandomPoints(ST_Union(geom), 1000, 0) geom 
+SELECT ST_RandomPoints(geom, 1000, 0) geom 
 FROM a_mf_boundary_mtm7;
 
 -- Add a spatial index on the points
@@ -529,7 +536,7 @@ WHERE id = 540;
 ----------------------------------------------
 -- 4.2) Extraction from POLYGONS for POLYGONS 
 ----------------------------------------------
--- Create a 100m buffer table and index it. 30000 m square
+-- Create a 100m buffer table
 --DROP TABLE IF EXISTS e_random_buffers_mf_1000_mtm7;
 CREATE TABLE e_random_buffers_mf_1000_mtm7 AS
 SELECT id, ST_Buffer(geom, 100) geom
@@ -543,13 +550,16 @@ SELECT *
 FROM e_random_buffers_mf_1000_mtm7;
 
 ---------------------------------------------------------------
--- 4.2.1) Extraction nominal values from POLYGONS for POLYGONS
+-- 4.2.1) Extraction of nominal values from POLYGONS for POLYGONS
 ---------------------------------------------------------------
 -- *** Actual Query - Extract the area covered and the proportion of each type of forest cover for each buffer (11s)
 --DROP TABLE IF EXISTS e_random_buffers_mf_coverarea_1000_mtm7;
 CREATE TABLE e_random_buffers_mf_coverarea_1000_mtm7 AS
 WITH buffer_parts AS (
-  SELECT buf.id, ctype, ST_Area(buf.geom) bufferarea, ST_Intersection(buf.geom, c.geom) geom
+  SELECT buf.id, 
+         ctype, 
+         ST_Area(buf.geom) bufferarea, 
+         ST_Intersection(buf.geom, c.geom) geom
   FROM e_random_buffers_mf_1000_mtm7 buf, 
        c_forest_no_gaps_mtm7 c
   WHERE ST_Intersects(buf.geom, c.geom)
